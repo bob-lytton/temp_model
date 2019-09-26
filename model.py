@@ -6,62 +6,13 @@ import numpy as np
 
 from locked_dropout import LockedDropout
 from ON_LSTM import ONLSTMStack
-from fakegcn import Graph
 
-class Pos_choser(nn.Module):
-	### Take in the tree currently generated, and return the distribution of positions to insert the next node
-	def __init__(self, ntoken, node_dim, dropout=0.1):
-		super(Pos_choser,self).__init__()
-		self.drop = nn.Dropout(dropout)
-	###
-	#	self.gcn = GCN()
-	#	self.aggregation = pool()
-	###
-		self.inp_dim = node_dim * 2
-		self.node_dim = node_dim
-		'''
-			The score_cal network will take in the GCN result of a position and the aggregation result of the whole graph,
-			then calculate the score of choosing this position
-		'''
-		self.score_cal = nn.Sequential(nn.Linear(self.inp_dim, self.node_dim), 
-			nn.ReLU(),
-			self.drop,
-			nn.Linear(self.node_dim, 1))
-
-	def forward(self, cur_tree, sentence_encoder, dictionary):
-		num_samples = cur_tree.nodenum()
-		cur_tree.make_index(0)
-		###
-		'''
-		self.gcn(cur_tree)
-		node_hidden = cur_tree.hidden_states ### should be a 2-D tensor
-		graph_hidden = self.aggregation(cur_tree) 
-		graph_hidden = graph_hidden.repeat(num_samples)
-		node_hidden = torch.cat((node_hidden, graph_hidden), 1)
-		'''
-		the_graph = cur_tree.tree2graph(sentence_encoder, dictionary, self.node_dim)
-		node_hidden = the_graph.node_embs
-		graph_hidden = the_graph.the_aggr()
-		graph_hidden = graph_hidden.repeat(num_samples).view(self.node_dim, -1)
-		node_hidden = torch.cat((node_hidden, graph_hidden), 1)
-		###
-		leaves = cur_tree.leaves(True)
-		leave_inds = [x.index for x in leaves]
-		leave_states = node_hidden[leave_inds]
-		scores = map(self.score_cal, leave_states)
-		scores = F.softmax(scores)
-		### Return available positions, their indexes, and their distribution of probability
-		return leaves, leave_inds, scores
-
-	def init_hidden(self):
-		for layer in self.score_cal:
-			if isinstance(layer, nn.Linear):
-				torch.nn.init.xavier_uniform_(layer.weight)
-
-class sentence_encoder(nn.Module):
-	### take in a sentence, return its encoded embedding and hidden states(for attention)
+class ONLSTMEncoder(nn.Module):
+	"""
+	take in a sentence, return its encoded embedding and hidden states (for attention)
+	"""
 	def __init__(self, ntoken, h_dim, emb_dim, nlayers, chunk_size, wdrop=0, dropouth=0.5):
-		super(sentence_encoder, self).__init__()
+		super(ONLSTMEncoder, self).__init__()
 		self.lockdrop = LockedDropout()
 		self.hdrop = nn.Dropout(dropouth)
 		self.encoder = nn.Embedding(ntoken, emb_dim)
@@ -81,29 +32,214 @@ class sentence_encoder(nn.Module):
 		self.wdrop = wdrop
 		self.dropouth = dropouth
 
-	def forward(self, inp_sentence, hidden):
-		emb = self.encoder(inp_sentence)
-		print('inp sen: ', inp_sentence)
-		print('emb: ', emb)
-		output, hidden, raw_outputs, outputs, distances = self.rnn(emb, hidden)
-		self.distance = distances
-		result = output.view(output.size(0)*output.size(1), output.size(2))
-		'''
-		 It seems that the 'hidden' is the encoding output and final cell states of layers
-		 the 'result' is (2-d) the hidden output of the last layers
-		 the 'outputs' is the stack of 'result' in layers
-		'''
-
-		return result.permute(0,1), hidden, raw_outputs, outputs
-
 	def init_hidden(self, bsz):
 		return self.rnn.init_hidden(bsz)
 
-class naiveLSTMCell(nn.Module):
-	### In our model, we have to involve per step of LSTM with tree processing and attention, so we rewrite the single cell of LSTM to deal with it
+	def init_weights(self):
+		initrange = 0.1
+		self.encoder.weight.data.uniform_(-initrange, initrange)
+		self.decoder.bias.data.fill_(0)
+		self.decoder.weight.data.uniform_(-initrange, initrange)
+	
+	def forward(self, input, hidden):
+		"""
+		'hidden' is the encoding output and final cell states of layers\\
+		'result' is (2-d) the hidden output of the last layers\\
+		'outputs' is the stack of 'result' in layers
+		"""
+		emb = self.encoder(input)
+		print('input sentence: ', input)
+		print('embedding: ', emb)
+		raw_output, hidden, raw_outputs, outputs, distances = self.rnn(emb, hidden)
+		self.distance = distances	# TODO: what is distance for?
+		result = raw_output.view(raw_output.size(0)*raw_output.size(1), raw_output.size(2))
+		return result.permute(0,1), hidden, raw_outputs, outputs	# permute() changes the order of each dimension 
+
+class LSTMDecoder(nn.Module):
+	"""
+	inspired from 'non-monotonic generation'\\
+	copied from 'non-monotonic generation'...
+	"""
+	def __init__(self, config, tok2i, sampler, encoder):
+		super(LSTMDecoder, self).__init__()
+		self.fc_dim = config['fc_dim']  # fc?
+		self.dec_lstm_dim = config['dec_lstm_dim']
+		self.dec_n_layers = config['dec_n_layers']  # decoder layers number
+		self.n_classes = config['n_classes']        # number of token classes
+		self.word_emb_dim = config['word_emb_dim']  # dimension of word embedding
+		self.device = config['device']
+		self.longest_label = config['longest_label']
+		self.model_type = config['model_type']
+		self.aux_end = config.get('aux_end', False)
+		self.encoder = encoder
+
+		# -- Decoder
+		self.dec_lstm_input_dim = config.get('dec_lstm_input_dim', self.word_emb_dim)
+		self.dec_lstm = nn.LSTM(self.dec_lstm_input_dim, self.dec_lstm_dim, self.dec_n_layers, batch_first=True)    # use torch implemented LSTM
+		self.dec_emb = nn.Embedding(self.n_classes, self.word_emb_dim)
+		if config['nograd_emb']:
+			self.dec_emb.weight.requires_grad = False
+		self.dropout = nn.Dropout(p=config['dropout'])
+
+		# Layers for mapping LSTM output to scores
+		self.o2emb = nn.Linear(self.dec_lstm_dim, self.word_emb_dim)
+		# Optionally use the (|V| x d_emb) matrix from the embedding layer here.
+		if config['share_inout_emb']:   # in bagorder, default is True
+			self.out_bias = nn.Parameter(torch.zeros(self.n_classes).uniform_(0.01))
+			self.emb2score = lambda x: F.linear(x, self.dec_emb.weight, self.out_bias)  # emb2score(x) = x*dec_emb.weight + out_bias
+		else:
+			self.emb2score = nn.Linear(self.word_emb_dim, self.n_classes)
+
+		self.register_buffer('START', torch.LongTensor([tok2i['<s>']]))
+		self.sampler = sampler
+		self.end = tok2i['<end>']
+
+		if self.aux_end:
+			self.o2stop = nn.Sequential(nn.Linear(self.dec_lstm_dim, self.word_emb_dim),
+										nn.ReLU(),
+										self.dropout,
+										nn.Linear(self.word_emb_dim, 1),
+										nn.Sigmoid())
+
+		if self.model_type == 'translation':
+			self.enc_to_h0 = nn.Linear(config['enc_lstm_dim'] * config['num_dir_enc'],
+										self.dec_n_layers * self.dec_lstm_dim)
+			# TODO: add attention layer
+			# self.attention = AttentionLayer(input_dim=self.dec_lstm_dim,
+			# 								hidden_size=self.dec_lstm_dim,
+			# 								bidirectional=config['num_dir_enc'] == 2)
+			# self.decode = self.forward_decode_attention
+			self.decode = self.forward_decode	# temporarily use this
+			self.dec_emb.weight = self.encoder.emb.weight
+		else:
+			self.decode = self.forward_decode   # in bagorder, decode is forward_decode
+
+	def o2score(self, x):
+		x = self.o2emb(x)   # calculate embedding
+		x = F.relu(x)
+		x = self.dropout(x)
+		x = self.emb2score(x)
+		return x
+
+	def forward(self, xs=None, oracle=None, max_steps=None, num_samples=None, return_p_oracle=False):   # xs means input strings
+		B = num_samples if num_samples is not None else xs.size(0)  # B is number of samples
+		encoder_output = self.encode(xs)
+		hidden = self.init_hidden(encoder_output if encoder_output is not None else B)  # initialize hidden each time runs forward
+		scores = []
+		samples = []
+		p_oracle = []
+		self.sampler.reset(bsz=B)   # calling stack seems to be deep
+		if self.training:
+			done = oracle.done()
+			xt = self.START.detach().expand(B, 1)   # START is a register buffer
+			t = 0
+			while not done:
+				hidden = self.process_hidden_pre(hidden, xt, encoder_output)    # just return hidden
+				score_t, _, hidden = self.decode(xt, hidden, encoder_output)    # in bagorder, self.decode is self.forward_decode
+				xt = self.sampler(score_t, oracle, training=True)               # here the model samples from the oracle (?)
+				hidden = self.process_hidden_post(hidden, xt, encoder_output)   # in bagorder, hidden[0] + encoder_output
+				p_oracle.append(oracle.distribution())                      # distribution generated by oracle
+				oracle.update(xt)                                           # p_oracle adds the output of oracle
+				samples.append(xt)
+				scores.append(score_t)
+				t += 1
+				done = oracle.done()
+				if max_steps and t == max_steps:
+					done = True
+
+			self.longest_label = max(self.longest_label, t)
+		else:
+			with torch.no_grad():
+				xt = self.START.detach().expand(B, 1)
+				for t in range(self.longest_label):
+					hidden = self.process_hidden_pre(hidden, xt, encoder_output)
+					score_t, _, hidden = self.decode(xt, hidden, encoder_output)
+					xt = self.sampler(score_t, oracle=None, training=False)
+					hidden = self.process_hidden_post(hidden, xt, encoder_output)
+					scores.append(score_t)
+					samples.append(xt)
+
+		samples = torch.cat(samples, 1)
+		if not self.aux_end:
+			scores = torch.cat(scores, 1)
+		if return_p_oracle:
+			p_oracle = torch.stack(p_oracle, 1)
+			return scores, samples, p_oracle
+		return scores, samples
+
+	def encode(self, xs):
+		if self.model_type == 'unconditional':
+			encoder_output = None
+		elif self.model_type == 'bagorder':
+			encoder_output = self.encoder(xs)
+			encoder_output = encoder_output.unsqueeze(0).expand(self.dec_n_layers, xs.size(0),
+																self.dec_lstm_dim).contiguous()
+		elif self.model_type == 'translation':
+			encoder_output = self.encoder(xs)
+		else:
+			raise NotImplementedError('Unsupported model type %s' % self.model_type)
+		return encoder_output
+
+	def forward_decode(self, xt, hidden, encoder_output):
+		xes = self.embed_input(xt)  # make xt into embedding
+		xes = self.dropout(xes)
+		lstm_output, hidden = self.dec_lstm(xes, hidden)
+		scores = self.o2score(lstm_output)
+		if self.aux_end:
+			stop = self.o2stop(lstm_output).squeeze(2)
+			scores = (scores, stop)
+		return scores, lstm_output, hidden
+
+	# def forward_decode_attention(self, xt, hidden, encoder_output):
+	# 	enc_states, enc_hidden, attn_mask = encoder_output
+	# 	xes = self.embed_input(xt)
+	# 	xes = self.dropout(xes)
+	# 	lstm_output, hidden = self.dec_lstm(xes, hidden)
+	# 	lstm_output, _ = self.attention(lstm_output, hidden, (enc_states, attn_mask))
+	# 	scores = self.o2score(lstm_output)
+	# 	if self.aux_end:
+	# 		stop = self.o2stop(lstm_output).squeeze(2)
+	# 		scores = (scores, stop)
+	# 	return scores, lstm_output, hidden
+
+	def embed_input(self, xt):
+		return self.dec_emb(xt)
+
+	def init_hidden(self, encoder_output):
+		N = self.dec_n_layers
+		D = self.dec_lstm_dim
+		if self.model_type == 'unconditional':
+			B = encoder_output
+			hidden = (torch.zeros(N, B, D, device=self.device),
+						torch.zeros(N, B, D, device=self.device))
+		elif self.model_type == 'bagorder':
+			B = encoder_output.size(1)
+			hidden = (encoder_output,
+						torch.zeros(N, B, D, device=self.device))
+		elif self.model_type == 'translation':
+			_, last_hidden, _ = encoder_output
+			B = last_hidden.size(0)
+			hidden = (self.enc_to_h0(last_hidden).view(B, N, D).transpose(0, 1),
+						torch.zeros(N, B, D, device=self.device))
+		else:
+			raise NotImplementedError('Unsupported model type %s' % self.model_type)
+		return hidden
+
+	def process_hidden_pre(self, hidden, input_token, encoder_output):
+		return hidden
+
+	def process_hidden_post(self, hidden, sampled_token, encoder_output):
+		"""Add the encoder embedding for bagorder task"""
+		if self.model_type == "bagorder":
+			hidden = (hidden[0] + encoder_output, hidden[1])
+		return hidden
+
+class LSTMCell(nn.Module):
+	### In our model, we have to involve per step of LSTM with tree processing and attention, 
+	# 		so we rewrite the single cell of LSTM to deal with it
 	### Hope for successful parallel computing!
 	def __init__(self, inp_size, hidden_size):
-		super(naiveLSTMCell, self).__init__()
+		super(LSTMCell, self).__init__()
 		self.inp_size = inp_size
 		self.hidden_size = hidden_size
 
@@ -157,64 +293,7 @@ class naiveLSTMCell(nn.Module):
 		self.cur_h = o * torch.tanh(self.cur_cell)
 		return cur_cell, cur_h
 
-class word_choser(nn.Module):
-	def __init__(self, ntoken, ntoken_out, hidden_dim, emb_dim, chunk_size, nlayers):
-		super(word_choser, self).__init__()
-		self.lockdrop = LockedDropout()
-		self.dim_up = torch.nn.Parameter(torch.FloatTensor(np.zeros((hidden_dim, ntoken))))
-		self.dim_down = torch.nn.Parameter(torch.FloatTensor(np.zeros((ntoken, hidden_dim))))
-		self.dim_out = torch.nn.Parameter(torch.FloatTensor(np.zeros((hidden_dim, ntoken_out))))
-		self.inpdim = emb_dim + hidden_dim + 1
-		self.outdim = hidden_dim
-		###
-		#	self.attention_gcn = GCN()
-		#	self.attention_pool = pool()
-		###
-		self.ntoken = ntoken
-		self.ntoken_out = ntoken_out
-		self.hidden_dim = hidden_dim
-		self.emb_dim = emb_dim
-		self.chunk_size = chunk_size
-		self.nlayers = nlayers
-		self.lstm = naiveLSTMCell(self.inpdim, hidden_dim)
-		self.init_weights()
-
-	def init_weights(self):
-		initrange = 0.1
-		self.dim_up.data.uniform_(-initrange, initrange)
-		self.dim_down.data.uniform_(-initrange, initrange)
-		self.dim_out.data.uniform_(-initrange, initrange)
-		self.lstm.init_weights()
-		self.lstm.init_cellandh()
-
-	def forward(self, sen_emb, hiddens, pos_index):
-		hiddens_up = hiddens.mm(self.dim_up)
-		sen_len = hiddens.size(0)
-		###
-		'''
-		or_graph = Graph(node_num = sen_len + 1)
-		or_graph.nodes[0:sen_len] = hiddens_up
-		or_graph.nodes[sen_len] = self.lstm.cur_h
-		self.attention_gcn(or_graph)
-		att_result = self.attention_pool(or_graph)
-		graph_emb = att_result.mm(self.dim_down)
-		'''
-		or_graph = Graph(sen_len+1, self.emb_dim, self.emb_dim)
-		or_graph.ram_full_init()
-		or_graph.node_embs[0:sen_len] = hiddens_up
-		or_graph.node_embs[sen_len] = self.lstm.cur_h
-		or_graph.the_gcn()
-		att_result = or_graph.the_aggr()
-		graph_emb = att_result.mm(self.dim_down)
-		###
-		the_inp = torch.cat((sen_emb, graph_emb, torch.Tensor([pos_index])))
-		_, h = self.lstm(the_inp)
-		h = h.mm(self.dim_out)
-		h = F.softmax(h)
-		return h
-
 if __name__ == "__main__":
-	pc = Pos_choser(1, 1)
-	se = sentence_encoder(1, 1, 1, 1, 1)
-	nlc = naiveLSTMCell(1, 1)
-	wc = word_choser(1, 1, 1, 1, 1)
+	test_encoder = ONLSTMEncoder(1, 1, 1, 1, 1)
+	test_decoder = LSTMDecoder()
+	test_LSTM = LSTMCell(1, 1)

@@ -1,0 +1,5 @@
+1. We have ON_LSTM.py
+2. do we have decoder?
+3. we need to build our own encoder and decoder
+4. now we start to 
+    build our model
