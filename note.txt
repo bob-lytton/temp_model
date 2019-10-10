@@ -3,3 +3,5 @@
 3. we need to build our own encoder and decoder
 4. now we start to 
     build our model
+
+- No attention layers in ON_LSTM!
