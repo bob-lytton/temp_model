@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+from attention import AttentionLayer
 from locked_dropout import LockedDropout
 from ON_LSTM import ONLSTMStack
 
@@ -58,7 +59,11 @@ class ONLSTMEncoder(nn.Module):
 class LSTMDecoder(nn.Module):
 	"""
 	inspired from 'non-monotonic generation'\\
-	copied from 'non-monotonic generation'...
+	copied from 'non-monotonic generation'...\\
+	Though the name is 'decoder', this class is in fact the whole model, including encoder and decoder.\\
+    self.encoder is the BOWEncoder according to the train.py.\\
+    However, it provides an interface for different encoders.\\
+    self.decode is the decoder, elected from forward_decode_attention() or forward_decode()
 	"""
 	def __init__(self, config, tok2i, sampler, encoder):
 		super(LSTMDecoder, self).__init__()
@@ -71,7 +76,7 @@ class LSTMDecoder(nn.Module):
 		self.longest_label = config['longest_label']
 		self.model_type = config['model_type']
 		self.aux_end = config.get('aux_end', False)
-		self.encoder = encoder
+		self.encoder = encoder		# encoder is ONLSTMEncoder
 
 		# -- Decoder
 		self.dec_lstm_input_dim = config.get('dec_lstm_input_dim', self.word_emb_dim)
@@ -105,10 +110,10 @@ class LSTMDecoder(nn.Module):
 			self.enc_to_h0 = nn.Linear(config['enc_lstm_dim'] * config['num_dir_enc'],
 										self.dec_n_layers * self.dec_lstm_dim)
 			# TODO: add attention layer
-			# self.attention = AttentionLayer(input_dim=self.dec_lstm_dim,
-			# 								hidden_size=self.dec_lstm_dim,
-			# 								bidirectional=config['num_dir_enc'] == 2)
-			# self.decode = self.forward_decode_attention
+			self.attention = AttentionLayer(input_dim=self.dec_lstm_dim,
+											hidden_size=self.dec_lstm_dim,
+											bidirectional=config['num_dir_enc'] == 2)
+			self.decode = self.forward_decode_attention
 			self.decode = self.forward_decode	# temporarily use this
 			self.dec_emb.weight = self.encoder.emb.weight
 		else:
@@ -190,17 +195,17 @@ class LSTMDecoder(nn.Module):
 			scores = (scores, stop)
 		return scores, lstm_output, hidden
 
-	# def forward_decode_attention(self, xt, hidden, encoder_output):
-	# 	enc_states, enc_hidden, attn_mask = encoder_output
-	# 	xes = self.embed_input(xt)
-	# 	xes = self.dropout(xes)
-	# 	lstm_output, hidden = self.dec_lstm(xes, hidden)
-	# 	lstm_output, _ = self.attention(lstm_output, hidden, (enc_states, attn_mask))
-	# 	scores = self.o2score(lstm_output)
-	# 	if self.aux_end:
-	# 		stop = self.o2stop(lstm_output).squeeze(2)
-	# 		scores = (scores, stop)
-	# 	return scores, lstm_output, hidden
+	def forward_decode_attention(self, xt, hidden, encoder_output):
+		enc_states, enc_hidden, attn_mask = encoder_output
+		xes = self.embed_input(xt)
+		xes = self.dropout(xes)
+		lstm_output, hidden = self.dec_lstm(xes, hidden)
+		lstm_output, _ = self.attention(lstm_output, hidden, (enc_states, attn_mask))
+		scores = self.o2score(lstm_output)
+		if self.aux_end:
+			stop = self.o2stop(lstm_output).squeeze(2)
+			scores = (scores, stop)
+		return scores, lstm_output, hidden
 
 	def embed_input(self, xt):
 		return self.dec_emb(xt)
@@ -234,66 +239,22 @@ class LSTMDecoder(nn.Module):
 			hidden = (hidden[0] + encoder_output, hidden[1])
 		return hidden
 
-class LSTMCell(nn.Module):
-	### In our model, we have to involve per step of LSTM with tree processing and attention, 
-	# 		so we rewrite the single cell of LSTM to deal with it
-	### Hope for successful parallel computing!
-	def __init__(self, inp_size, hidden_size):
-		super(LSTMCell, self).__init__()
-		self.inp_size = inp_size
-		self.hidden_size = hidden_size
-
-		self.inp_i = nn.Linear(hidden_size, inp_size)
-		self.inp_h = nn.Linear(hidden_size, hidden_size)
-		self.forget_i = nn.Linear(hidden_size, inp_size)
-		self.forget_h = nn.Linear(hidden_size, hidden_size)
-		self.out_i = nn.Linear(hidden_size, inp_size)
-		self.out_h = nn.Linear(hidden_size, hidden_size)
-		self.cell_i = nn.Linear(hidden_size, inp_size)
-		self.cell_h = nn.Linear(hidden_size, hidden_size)
-
-		self.init_weights()
-		self.cur_cell = torch.zeros(hidden_size)
-		self.cur_h = torch.zeros(hidden_size)
-
-	def init_weights(self):
-		stdv = 1. / math.sqrt(self.hidden_size)
-		self.inp_i.bias.data.fill_(0)
-		self.inp_i.weight.data.uniform_(-stdv, stdv)
-		self.inp_h.bias.data.fill_(0)
-		self.inp_h.weight.data.uniform_(-stdv, stdv)
-		self.forget_i.bias.data.fill_(0)
-		self.forget_i.weight.data.uniform_(-stdv, stdv)
-		self.forget_h.bias.data.fill_(0)
-		self.forget_h.weight.data.uniform_(-stdv, stdv)
-		self.out_i.bias.data.fill_(0)
-		self.out_i.weight.data.uniform_(-stdv, stdv)
-		self.out_h.bias.data.fill_(0)
-		self.out_h.weight.data.uniform_(-stdv, stdv)
-		self.cell_i.bias.data.fill_(0)
-		self.cell_i.weight.data.uniform_(-stdv, stdv)
-		self.cell_h.bias.data.fill_(0)
-		self.cell_h.weight.data.uniform_(-stdv, stdv)
-
-	def init_cellandh(self):
-		'''
-		stdv = 1. / math.sqrt(self.hidden_size)
-		self.cur_cell.data.uniform_(-stdv, stdv)
-		self.cur_h.data.uniform_(-stdv, stdv)
-		'''
-		self.cur_cell.data.fill_(0)
-		self.cur_h.data.fill_(0)
-
-	def forward(self, inp):
-		i = torch.sigmoid(self.inp_i(inp) + self.inp_h(self.cur_h))
-		f = torch.sigmoid(self.forget_i(inp) + self.forget_h(self.cur_h))
-		g = torch.tanh(self.cell_i(inp) + self.cell_h(self.cur_h))
-		o = torch.sigmoid(self.out_i(inp) + self.out_h(self.cur_h))
-		self.cur_cell = f * self.cur_cell + i * g
-		self.cur_h = o * torch.tanh(self.cur_cell)
-		return cur_cell, cur_h
-
 if __name__ == "__main__":
-	test_encoder = ONLSTMEncoder(1, 1, 1, 1, 1)
-	test_decoder = LSTMDecoder()
-	test_LSTM = LSTMCell(1, 1)
+	pass
+
+	# # -- MODEL
+	# model_config = {
+	# 	'fc_dim':        args.fc_dim,
+	# 	'dec_lstm_dim':  args.dec_lstm_dim,
+	# 	'dec_n_layers':  args.dec_n_layers,
+	# 	'n_classes':     args.n_classes,
+	# 	'word_emb_dim':  300,  # glove
+	# 	'dropout':       args.dropout,
+	# 	'device':        str(args.device),
+	# 	'longest_label': 10,  # gets adjusted during training
+	# 	'share_inout_emb': args.share_inout_emb,
+	# 	'nograd_emb': args.nograd_emb,
+	# 	'batch_size': args.batch_size,
+	# 	'model_type': args.model_type,
+	# 	'aux_end': args.aux_end # if string x is all in lowercase, x is input string
+	# }
