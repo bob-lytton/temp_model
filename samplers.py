@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-import tree_text_gen.binary.common.util as util
+import utils as util
 
 
 class GreedySampler(object):

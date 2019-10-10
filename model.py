@@ -7,10 +7,13 @@ import numpy as np
 from attention import AttentionLayer
 from locked_dropout import LockedDropout
 from ON_LSTM import ONLSTMStack
+from utils import build_tok2i
+from samplers import GreedySampler, MultinomialSampler, StochasticSampler, TopkSampler, PolicyCorrectSampler
 
 class ONLSTMEncoder(nn.Module):
 	"""
-	take in a sentence, return its encoded embedding and hidden states (for attention)
+	Take in a sentence, return its encoded embedding and hidden states (for attention)\\
+	TODO: encoder_output required by decoder model: encoder states, encoder hidden, attention mask
 	"""
 	def __init__(self, ntoken, h_dim, emb_dim, nlayers, chunk_size, wdrop=0, dropouth=0.5):
 		super(ONLSTMEncoder, self).__init__()
@@ -153,7 +156,7 @@ class LSTMDecoder(nn.Module):
 					done = True
 
 			self.longest_label = max(self.longest_label, t)
-		else:
+		else:		# evaluating and using
 			with torch.no_grad():
 				xt = self.START.detach().expand(B, 1)
 				for t in range(self.longest_label):
@@ -186,6 +189,9 @@ class LSTMDecoder(nn.Module):
 		return encoder_output
 
 	def forward_decode(self, xt, hidden, encoder_output):
+		"""
+		encoder_output does nothing here
+		"""
 		xes = self.embed_input(xt)  # make xt into embedding
 		xes = self.dropout(xes)
 		lstm_output, hidden = self.dec_lstm(xes, hidden)
@@ -240,21 +246,33 @@ class LSTMDecoder(nn.Module):
 		return hidden
 
 if __name__ == "__main__":
-	pass
+	# -- MODEL
+	tokens = ['<s>', '<p>', '<end>']
+	tok2i = build_tok2i(tokens)
+	model_config = {
+		'fc_dim':        		512, 			# args.fc_dim,
+		'dec_lstm_dim':  		1024, 			# args.dec_lstm_dim,
+		'dec_n_layers':  		2, 				# args.dec_n_layers,
+		'n_classes':     		len(tok2i), 	# args.n_classes,
+		'word_emb_dim':  		300,  			# glove
+		'dropout':       		0.2, 			# args.dropout,
+		'device':        		'cpu', 			# str(args.device),
+		'longest_label': 		10,  			# gets adjusted during training
+		'share_inout_emb': 		'true',			# args.share_inout_emb,
+		'nograd_emb': 			'true',			# args.nograd_emb,
+		'batch_size': 	 		32,				# args.batch_size,
+		'model_type': 	 		'transformer', 	# args.model_type,
+		'aux_end': 				'true'			# args.aux_end # if string x is all in lowercase, x is input string
+	}
+	n_classes = len(tok2i)
+	print(tokens, tok2i, model_config, n_classes)
+	ntoken = len(tokens)
+	h_dim = 10
+	emb_dim = 2
+	nlayers = 2
+	chunk_size = 1
 
-	# # -- MODEL
-	# model_config = {
-	# 	'fc_dim':        args.fc_dim,
-	# 	'dec_lstm_dim':  args.dec_lstm_dim,
-	# 	'dec_n_layers':  args.dec_n_layers,
-	# 	'n_classes':     args.n_classes,
-	# 	'word_emb_dim':  300,  # glove
-	# 	'dropout':       args.dropout,
-	# 	'device':        str(args.device),
-	# 	'longest_label': 10,  # gets adjusted during training
-	# 	'share_inout_emb': args.share_inout_emb,
-	# 	'nograd_emb': args.nograd_emb,
-	# 	'batch_size': args.batch_size,
-	# 	'model_type': args.model_type,
-	# 	'aux_end': args.aux_end # if string x is all in lowercase, x is input string
-	# }
+	model = LSTMDecoder(model_config, tok2i, GreedySampler(model_config['aux_end']), 
+						ONLSTMEncoder(ntoken, h_dim, emb_dim, nlayers, chunk_size))
+	
+	print('Init succefully!')
