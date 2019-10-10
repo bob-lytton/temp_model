@@ -17,6 +17,7 @@ import data
 import model
 from model import ONLSTMEncoder
 from model import LSTMDecoder as Decoder
+from splitcross import SplitCrossEntropyLoss
 from utils import batchify, get_batch, repackage_hidden
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank RNN/LSTM Language Model, training and evaluating.')
@@ -87,19 +88,14 @@ def model_load(fn):
 		model_encoder, model_decoder, optimizer = torch.load(f)
 	return model_encoder, model_decoder, optimizer
 
-def data_load(train_batch_size=args.batch_size, eval_batch_size=10, test_batch_size=1):
+def data_load(corpus, train_batch_size=args.batch_size, eval_batch_size=10, test_batch_size=1):
 	train_data = batchify(corpus.train, args.batch_size, args)
 	val_data = batchify(corpus.valid, eval_batch_size, args)
 	test_data = batchify(corpus.test, test_batch_size, args)
 	return train_data, val_data, test_data
 
-# calculate loss 
-# TODO: data related
-def loss():
-	pass
-
 # Initiate optimizer
-def init_optimizer(optim_type):
+def init_optimizer(optim_type, params):
 	optimizer = None
 	# Ensure the optimizer is optimizing params, 
 	# which includes both the model's weights as well as the criterion's weight (i.e. Adaptive Softmax)
@@ -113,8 +109,62 @@ def init_optimizer(optim_type):
 
 # train
 # TODO: data related
-def train(epoch_num):
-	pass
+# TODO: fuse the encoder and decoder into a single model class
+def train(epoch_num, corpus, train_data, optimizer, criterion):
+	total_loss = 0
+	start_time = time.time()
+	ntokens = len(corpus.dictionary)
+	hidden = model.init_hidden(args.batch_size)
+	batch, i = 0, 0
+	while i < train_data.size(0) - 1 - 1:
+		bptt = args.bptt if np.random.random() < 0.95 else args.bptt / 2
+		# Prevent excessively small or negative sequence lengths
+		seq_len = max(5, int(np.random.normal(bptt, 5)))	# TODO: why np.random.normal?
+
+		lr2 = optimizer.param_groups[0]['lr']
+		optimizer.param_groups[0]['lr'] = lr2 * seq_len / args.bptt
+		model.train()	# set the model to training mode
+		data, targets = get_batch(train_data, i, args, seq_len=seq_len)
+
+		hidden = repackage_hidden(hidden)
+		optimizer.zero_grad()
+
+		# Get the output of the model, then calculate loss
+		output, hidden, rnn_hs, dropped_rnn_hs = model(data, hidden, return_h=True)
+		raw_loss = criterion(model.decoder.weight, model.decoder.bias, output, targets)
+		loss = raw_loss
+        # Activiation Regularization
+		if args.alpha:
+			loss = loss + sum(
+				args.alpha * dropped_rnn_h.pow(2).mean()
+				for dropped_rnn_h in dropped_rnn_hs[-1:]
+			)
+        # Temporal Activation Regularization (slowness)
+		if args.beta:
+			loss = loss + sum(
+				args.beta * (rnn_h[1:] - rnn_h[:-1]).pow(2).mean()
+				for rnn_h in rnn_hs[-1:]
+			)
+
+		loss.backward()
+		if args.clip:
+			torch.nn.utils.clip_grad_norm_(params, args.clip)
+		optimizer.step()
+
+		total_loss += raw_loss.data
+		optimizer.param_groups[0]['lr'] = lr2
+		if batch % args.log_interval == 0 and batch > 0:
+			cur_loss = total_loss.item() / args.log_interval
+			elapsed = time.time() - start_time
+			print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:05.5f} | ms/batch {:5.2f} | '
+				'loss {:5.2f} | ppl {:8.2f} | bpc {:8.3f}'.format(
+				epoch, batch, len(train_data) // args.bptt, optimizer.param_groups[0]['lr'],
+						elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss), cur_loss / math.log(2)))
+			total_loss = 0
+			start_time = time.time()
+
+		batch += 1
+		i += seq_len
 
 if __name__ == "__main__":
 
@@ -137,8 +187,9 @@ if __name__ == "__main__":
 		corpus = data.Corpus(args.data)
 		torch.save(corpus, fn)
 
+		
 	# Load data
-	train_data, val_data, test_data = data_load()
+	train_data, val_data, test_data = data_load(corpus)
 
 	# Initiate model
 	ntokens = len(corpus.dictionary)
@@ -146,16 +197,34 @@ if __name__ == "__main__":
 								 args.nlayers, args.chunksize, args.wdrop, args.dropouth)
 	model_decoder = Decoder()
 
+	# Load criterion
+	criterion = None
+	if not criterion:
+		splits = []
+		if ntokens > 500000:
+			# One Billion
+			# This produces fairly even matrix mults for the buckets:
+			# 0: 11723136, 1: 10854630, 2: 11270961, 3: 11219422
+			splits = [4200, 35000, 180000]
+		elif ntokens > 75000:
+			# WikiText-103
+			splits = [2800, 20000, 76000]
+		print('Using', splits)
+		criterion = SplitCrossEntropyLoss(args.emsize, splits=splits, verbose=False)
+	if args.cuda:
+		model = model.cuda()
+		criterion = criterion.cuda()
+
 	# Counting params
-	params = list(model_encoder.parameters()) + list(model_decoder.parameters())
+	params = list(model_encoder.parameters()) + list(model_decoder.parameters()) + list(criterion.parameters())
 	total_params = sum(x.size()[0] * x.size()[1] if len(x.size()) > 1 else x.size()[0] for x in params)
 	print('Args:', args)
 	print('Model total parameters:', total_params)
 
 	if args.optimizer == 'sgd':
-		optimizer = init_optimizer(args.optimizer)
+		optimizer = init_optimizer(args.optimizer, params)
 	elif args.optimizer == 'adam':
-		optimizer, scheduler = init_optimizer(args.optimizer)
+		optimizer, scheduler = init_optimizer(args.optimizer, params)
 
 	# If use saved model to continue training
 	if args.resume:
@@ -172,9 +241,9 @@ if __name__ == "__main__":
 	#--- START TRAINING ---#
 	# use Ctrl+C to break out of training at any point
 	try:
-		print('traindata', train_data)
+		print('--TRAINDATA--', train_data)
 		for epoch in range(args.epochs):
-			train(epoch)		# training for one epoch
+			train(epoch, corpus, train_data, optimizer, criterion)		# training for one epoch
 	except KeyboardInterrupt:
 		print('-' * 89)
 		print('Exiting from training early')
