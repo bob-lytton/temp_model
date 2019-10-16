@@ -15,8 +15,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 
 import data
 import model
-from model import ONLSTMEncoder
-from model import LSTMDecoder as Decoder
+from model import ONLSTMEncoder, LSTMDecoder
 from splitcross import SplitCrossEntropyLoss
 from utils import batchify, get_batch, repackage_hidden
 
@@ -76,7 +75,7 @@ def model_save(fn, model_encoder, model_decoder, optimizer):
 	if args.cluster:
 		pass
 	with open(fn, 'wb') as f:
-		torch.save([model_encoder, model_decoder, optimizer], f)
+		torch.save([model, criterion, optimizer], f)
 
 def model_load(fn):
 	"""
@@ -85,8 +84,8 @@ def model_load(fn):
 	if args.cluster:
 		pass
 	with open(fn, 'rb') as f:
-		model_encoder, model_decoder, optimizer = torch.load(f)
-	return model_encoder, model_decoder, optimizer
+		model, criterion, optimizer = torch.load(f)
+	return model, criterion, optimizer
 
 def data_load(corpus, train_batch_size=args.batch_size, eval_batch_size=10, test_batch_size=1):
 	train_data = batchify(corpus.train, args.batch_size, args)
@@ -195,7 +194,7 @@ if __name__ == "__main__":
 	ntokens = len(corpus.dictionary)
 	model_encoder = ONLSTMEncoder(ntokens, args.hdim, args.emsize,
 								 args.nlayers, args.chunksize, args.wdrop, args.dropouth)
-	model_decoder = Decoder()
+	model = LSTMDecoder()
 
 	# Load criterion
 	criterion = None
@@ -211,12 +210,9 @@ if __name__ == "__main__":
 			splits = [2800, 20000, 76000]
 		print('Using', splits)
 		criterion = SplitCrossEntropyLoss(args.emsize, splits=splits, verbose=False)
-	if args.cuda:
-		model = model.cuda()
-		criterion = criterion.cuda()
 
 	# Counting params
-	params = list(model_encoder.parameters()) + list(model_decoder.parameters()) + list(criterion.parameters())
+	params = list(model.parameters()) + list(criterion.parameters())
 	total_params = sum(x.size()[0] * x.size()[1] if len(x.size()) > 1 else x.size()[0] for x in params)
 	print('Args:', args)
 	print('Model total parameters:', total_params)
@@ -229,14 +225,16 @@ if __name__ == "__main__":
 	# If use saved model to continue training
 	if args.resume:
 		print('Resuming models ...')
-		model_encoder, model_decoder, optimizer = model_load(args.resume)	# reload model and optimizer
+		model, criterion, optimizer = model_load(args.resume)	# reload model and optimizer
 		if args.wdrop:
 			for rnn in model.rnn.cells:
 				rnn.hh.dropout = args.wdrop
 
 	# Load to GPU
 	if args.cuda:
-		model_encoder = model_encoder.cuda()
+		# model_encoder = model_encoder.cuda()
+		model = model.cuda()
+		criterion = criterion.cuda()
 
 	#--- START TRAINING ---#
 	# use Ctrl+C to break out of training at any point

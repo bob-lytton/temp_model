@@ -1,7 +1,9 @@
+import json
+import jsonlines
 import os
-import torch
-
 from collections import Counter
+
+import torch
 
 
 class Dictionary(object):
@@ -62,3 +64,41 @@ class Corpus(object):
                     token += 1
 
         return ids
+
+class Tokenizer(object):
+    """
+    Tokenize .txt files to .jsonl files
+    """
+    def __init__(self, path):
+        self.path = path
+        self.files = os.listdir(self.path)
+        self.tofiles = self.files.copy()
+        for i in range(len(self.tofiles)):
+            self.tofiles[i] = self.tofiles[i].replace('.txt', '.jsonl')
+        # print(self.tofiles)
+
+    def forward(self):
+        for filename in self.tofiles:
+            file = self.path + '/' + filename
+            if os.path.exists(file):
+                os.remove(file)
+        for idx in range(len(self.files)):
+            with open(self.path+'/'+self.files[idx], 'r') as fp:
+                lines = fp.readlines()
+                # i = 0
+                for line in lines:
+                    # i += 1
+                    tokenlist = line.split(' ')[1:-1]
+                    # tokenlist_1 = line.split(' ')[1:]
+                    tokendict = {"tokens": tokenlist}
+                    # tokendict_1 = {"tokens": tokenlist_1}
+                    # print(tokendict)
+                    # print(tokendict_1)
+                    # exit()
+                    # print(i, tokens)
+                    with jsonlines.open(self.path+'/'+self.tofiles[idx], mode='a') as writer:
+                        writer.write(tokendict)
+
+if __name__ == '__main__':
+    tokenizer = Tokenizer('data/penn')
+    tokenizer.forward()

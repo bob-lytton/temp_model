@@ -15,7 +15,7 @@ def batchify(data, bsz, args):
 	Transfer the data into batches.
 	"""
 	# Work out how cleanly we can divide the dataset into bsz parts.
-	nbatch = data.size // bsz
+	nbatch = data.size(0) // bsz
 	# Trim off any extra elements that wouldn't cleanly fit (remainders).
 	data = data[0:(nbatch * bsz)]
 	print(data)

@@ -14,6 +14,7 @@ class ONLSTMEncoder(nn.Module):
 	"""
 	Take in a sentence, return its encoded embedding and hidden states (for attention)\\
 	TODO: encoder_output required by decoder model: encoder states, encoder hidden, attention mask
+	TODO: add attention layer
 	"""
 	def __init__(self, ntoken, h_dim, emb_dim, nlayers, chunk_size, wdrop=0, dropouth=0.5):
 		super(ONLSTMEncoder, self).__init__()
