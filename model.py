@@ -10,55 +10,78 @@ from ON_LSTM import ONLSTMStack
 from utils import build_tok2i
 from samplers import GreedySampler, MultinomialSampler, StochasticSampler, TopkSampler, PolicyCorrectSampler
 
+"""
+Take in a sentence, return its encoded embedding and hidden states (for attention)\\
+TODO: encoder_output required by decoder model: encoder states, encoder hidden, attention mask
+TODO: add attention layer
+"""
 class ONLSTMEncoder(nn.Module):
-	"""
-	Take in a sentence, return its encoded embedding and hidden states (for attention)\\
-	TODO: encoder_output required by decoder model: encoder states, encoder hidden, attention mask
-	TODO: add attention layer
-	"""
-	def __init__(self, ntoken, h_dim, emb_dim, nlayers, chunk_size, wdrop=0, dropouth=0.5):
-		super(ONLSTMEncoder, self).__init__()
-		self.lockdrop = LockedDropout()
-		self.hdrop = nn.Dropout(dropouth)
-		self.encoder = nn.Embedding(ntoken, emb_dim)
-		self.rnn = ONLSTMStack(
-			[emb_dim] + [h_dim]*nlayers,
-			chunk_size = chunk_size,
-			dropconnect = wdrop,
-			dropout = dropouth
-			)
-		initrange = 0.1
-		self.encoder.weight.data.uniform_(-initrange, initrange)
-		self.h_dim = h_dim
-		self.emb_dim = emb_dim
-		self.nlayers = nlayers
-		self.ntoken = ntoken
-		self.chunk_size = chunk_size
-		self.wdrop = wdrop
-		self.dropouth = dropouth
+    """Container module with an encoder, a recurrent module, and a decoder."""
 
-	def init_hidden(self, bsz):
-		return self.rnn.init_hidden(bsz)
+    def __init__(self, ntoken, ninp, nhid, chunk_size, nlayers, dropout=0.5, dropouth=0.5, dropouti=0.5, dropoute=0.1, wdrop=0, tie_weights=False):
+        super(ONLSTMEncoder, self).__init__()
+        self.lockdrop = LockedDropout()
+        self.idrop = nn.Dropout(dropouti)
+        self.hdrop = nn.Dropout(dropouth)
+        self.drop = nn.Dropout(dropout)
+        self.encoder = nn.Embedding(ntoken, ninp)
+        self.rnn = ONLSTMStack(
+            [ninp] + [nhid] * (nlayers - 1) + [ninp],
+            chunk_size=chunk_size,
+            dropconnect=wdrop,
+            dropout=dropouth
+        )
+        self.decoder = nn.Linear(ninp, ntoken)
 
-	def init_weights(self):
-		initrange = 0.1
-		self.encoder.weight.data.uniform_(-initrange, initrange)
-		self.decoder.bias.data.fill_(0)
-		self.decoder.weight.data.uniform_(-initrange, initrange)
-	
-	def forward(self, input, hidden):
-		"""
-		'hidden' is the encoding output and final cell states of layers\\
-		'result' is (2-d) the hidden output of the last layers\\
-		'outputs' is the stack of 'result' in layers
-		"""
-		emb = self.encoder(input)
-		print('input sentence: ', input)
-		print('embedding: ', emb)
-		raw_output, hidden, raw_outputs, outputs, distances = self.rnn(emb, hidden)
-		self.distance = distances	# TODO: what is distance for?
-		result = raw_output.view(raw_output.size(0)*raw_output.size(1), raw_output.size(2))
-		return result.permute(0,1), hidden, raw_outputs, outputs	# permute() changes the order of each dimension 
+        # Optionally tie weights as in:
+        # "Using the Output Embedding to Improve Language Models" (Press & Wolf 2016)
+        # https://arxiv.org/abs/1608.05859
+        # and
+        # "Tying Word Vectors and Word Classifiers: A Loss Framework for Language Modeling" (Inan et al. 2016)
+        # https://arxiv.org/abs/1611.01462
+        if tie_weights:
+            #if nhid != ninp:
+            #    raise ValueError('When using the tied flag, nhid must be equal to emsize')
+            self.decoder.weight = self.encoder.weight
+
+        self.init_weights()
+
+        self.ninp = ninp
+        self.nhid = nhid
+        self.nlayers = nlayers
+        self.dropout = dropout
+        self.dropouti = dropouti
+        self.dropouth = dropouth
+        self.dropoute = dropoute
+        self.tie_weights = tie_weights
+
+    def init_weights(self):
+        initrange = 0.1
+        self.encoder.weight.data.uniform_(-initrange, initrange)
+        self.decoder.bias.data.fill_(0)
+        self.decoder.weight.data.uniform_(-initrange, initrange)
+
+    def forward(self, input, hidden, return_h=False):
+        emb = embedded_dropout(
+            self.encoder, input,
+            dropout=self.dropoute if self.training else 0
+        )
+
+        emb = self.lockdrop(emb, self.dropouti)
+
+        raw_output, hidden, raw_outputs, outputs, distances = self.rnn(emb, hidden)
+        self.distance = distances
+
+        output = self.lockdrop(raw_output, self.dropout)
+
+        result = output.view(output.size(0)*output.size(1), output.size(2))
+        if return_h:
+            return result, hidden, raw_outputs, outputs
+        else:
+            return result, hidden
+
+    def init_hidden(self, bsz):
+        return self.rnn.init_hidden(bsz)
 
 class LSTMDecoder(nn.Module):
 	"""
@@ -113,7 +136,6 @@ class LSTMDecoder(nn.Module):
 		if self.model_type == 'translation':
 			self.enc_to_h0 = nn.Linear(config['enc_lstm_dim'] * config['num_dir_enc'],
 										self.dec_n_layers * self.dec_lstm_dim)
-			# TODO: add attention layer
 			self.attention = AttentionLayer(input_dim=self.dec_lstm_dim,
 											hidden_size=self.dec_lstm_dim,
 											bidirectional=config['num_dir_enc'] == 2)
@@ -173,8 +195,8 @@ class LSTMDecoder(nn.Module):
 			scores = torch.cat(scores, 1)
 		if return_p_oracle:
 			p_oracle = torch.stack(p_oracle, 1)
-			return scores, samples, p_oracle
-		return scores, samples
+			return scores, samples, p_oracle, encoder_output
+		return scores, samples, encoder_output
 
 	def encode(self, xs):
 		if self.model_type == 'unconditional':
@@ -262,7 +284,7 @@ if __name__ == "__main__":
 		'share_inout_emb': 		'true',			# args.share_inout_emb,
 		'nograd_emb': 			'true',			# args.nograd_emb,
 		'batch_size': 	 		32,				# args.batch_size,
-		'model_type': 	 		'transformer', 	# args.model_type,
+		'model_type': 	 		'translator', 	# args.model_type,
 		'aux_end': 				'true'			# args.aux_end # if string x is all in lowercase, x is input string
 	}
 	n_classes = len(tok2i)
@@ -274,6 +296,6 @@ if __name__ == "__main__":
 	chunk_size = 1
 
 	model = LSTMDecoder(model_config, tok2i, GreedySampler(model_config['aux_end']), 
-						ONLSTMEncoder(ntoken, h_dim, emb_dim, nlayers, chunk_size))
+						ONLSTMEncoder(ntoken, emb_dim, h_dim, chunk_size, nlayers))
 	
 	print('Init succefully!')
