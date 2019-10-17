@@ -7,3 +7,6 @@
 - No attention layers in ON_LSTM!
 - encoder_output: encoder states, encoder hidden, attention mask
 - However, in the original ON_LSTM model, model.decoder is just used in calculating loss
+
+- Working on tree.py ...
+- Working on train() in main.py ...

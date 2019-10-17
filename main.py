@@ -69,9 +69,11 @@ def init_optimizer(optim_type, params):
 		return optimizer, scheduler
 
 # train
-# TODO: data related
-# TODO: fuse the encoder and decoder into a single model class
 def train(epoch_num, corpus, train_data, optimizer, criterion):
+	"""
+	Use different loss functions for encoder and decoder separately.
+	TODO: need to modify tree.py
+	"""
 	total_loss = 0
 	start_time = time.time()
 	ntokens = len(corpus.dictionary)
@@ -117,7 +119,7 @@ def train(epoch_num, corpus, train_data, optimizer, criterion):
 			torch.nn.utils.clip_grad_norm_(params, args.clip)
 		optimizer.step()
 
-		total_loss += raw_loss.data
+		encoder_total_loss += encoder_raw_loss.data
 		optimizer.param_groups[0]['lr'] = lr2
 		if batch % args.log_interval == 0 and batch > 0:
 			cur_loss = total_loss.item() / args.log_interval
@@ -137,6 +139,7 @@ if __name__ == "__main__":
 	# Set the random seed manually for reproducibility.
 	np.random.seed(args.seed)
 	torch.manual_seed(args.seed)
+	args.device = torch.device('cpu')
 	if torch.cuda.is_available():
 		if not args.cuda:
 			print("WARNING: You have a CUDA device, so you should probably run with --cuda")
@@ -144,8 +147,6 @@ if __name__ == "__main__":
 			torch.cuda.set_device(args.gpu)
 			args.device = torch.device('cuda:%d' % args.gpu)
 			torch.cuda.manual_seed(args.seed)
-	else:
-		args.device = torch.device('cpu')
 
 	# Load corpus
 	fn = 'corpus.{}.data'.format(hashlib.md5(args.data.encode()).hexdigest())
@@ -199,9 +200,9 @@ if __name__ == "__main__":
 	# Initiate decode oracle
 	oracle_flags = {}
 	if 'uniform' in args.oracle:
-		Oracle = Oracle
+		_Oracle = Oracle
 	elif 'leftright' in args.oracle:
-		Oracle = LeftToRightOracle
+		_Oracle = LeftToRightOracle
 
 	# Decoder related setup
 	# -- loss

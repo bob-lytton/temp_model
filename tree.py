@@ -3,130 +3,10 @@ import torch.nn as nn
 import random
 import copy
 
-class Tree():
-	"""
-	The MASK is used to copy trees while training the position and word choser\\
-	We used the processing tree as the input of training\\
-	Its word is contained in ROOT
-	"""
-	def __init__(self, root):
-		self.root = root
-		self.index = 0
-		self.left = False
-		self.right = False
-		# 0: don't copy its son
-		# 1: only copy left son if it have
-		# 2: copy both left and right sons
-		self.mask = 0
-
-	def __deepcopy__(self, memo):
-		if memo is None:
-			memo = {}
-		dup = Tree(self.root)
-		dup.index = self.index
-		if self.left and self.mask > 0:
-			dup.left = copy.deepcopy(self.left)
-		if self.right and self.mask > 1:
-			dup.right = copy.deepcopy(self.right)
-		return dup
-
-	def horizontal_scan(self, contain_end = True):
-		""" Return the result (sentence?) of horizontal scanning """
-		flag = bool(contain_end or (not self.root == '<end>'))
-		tmp = [self.root] if flag else []
-		if self.left:
-			tmp = self.left.horizontal_scan(contain_end)
-			if flag:
-				tmp.append(self.root)
-		if self.right:
-			tmp.extend(self.right.horizontal_scan(contain_end))
-		return tmp
-
-	def leaves(self, contain_single=False):
-		"""
-		Return its leaves\\
-		If contain_single, it will return the single-son node too
-		"""
-		if (not self.left) and (not self.right) and not(self.root == '<end>'):
-			return [self]
-		tmp = []
-		if contain_single and (self.root != '<end>') and (self.left == False or self.right == False):
-			tmp = [self]
-		if self.left:
-			tmp = self.left.leaves(contain_single) + tmp
-		if self.right:
-			tmp = tmp + self.right.leaves(contain_single)
-		return tmp
-
-	def nodenum(self):
-		tmp = 1
-		if self.left:
-			tmp = tmp + self.left.nodenum()
-		if self.right:
-			tmp = tmp + self.right.nodenum()
-		return tmp
-
-	def tree2graph(self, sen_encoder, dictionary, nodedim):
-		"""
-		just act like its name, waiting to finish
-		"""
-		nodenum = self.make_index() + 1
-		the_graph = Graph(nodenum, nodedim, nodedim)
-		the_graph.match_tree(self, sen_encoder, dictionary)
-		return the_graph
-
-	def make_index(self, start_i = 0):
-		"""
-		Attach horizontial index to the root node of its subtree.\\
-		Return the max index in the subtree
-		"""
-		if self.left == False and self.right == False:
-			self.index = start_i
-			return start_i
-		nodes = start_i
-		if self.left:
-			nodes = self.left.make_index(start_i) + 1
-		self.index = nodes
-		if self.right:
-			return self.right.make_index(nodes + 1)
-		return nodes
-
-	def find_index(self, theroot):
-		"""
-		Find the index of specific node with given word (theroot)
-		"""
-		a = self.left.find_index(theroot) if self.left else False
-		if a is not False:
-			return a
-		if self.root == theroot:
-			return self.index
-		a = self.right.find_index(theroot) if self.right else False
-		if a is not False:
-			return a
-		return False
-
-	def insert_son(self, father_index, son_root):
-		"""
-		Insert a node with given word
-		"""
-		if self.index == father_index:
-			if not self.left:
-				self.left = Tree(son_root)
-			elif not self.right: 
-				self.right = Tree(son_root)
-			else:
-				return False
-			return True
-		else:
-			if self.left == False or self.left.insert_son(father_index, son_root) == False:
-				return self.right and self.right.insert_son(father_index, son_root)
-			return True
-
-
 # Contains `Tree` and `Node` classes used by the oracle, and functions to transform
 # model samples (level-order token sequences) to an in-order sequence or a tree. 
+# TODO: will this model fit for ON-LSTM parser tree?
 
-"""
 class Tree(object):
     def __init__(self, root_node, end_idx):
         self.root = root_node
@@ -135,6 +15,9 @@ class Tree(object):
         self.END = end_idx
 
     def next(self):
+        """
+        return the root of next item in self.queue and update self.queue to subtree
+        """
         if len(self.queue) == 0:
             return None
         node = self.queue[0]
@@ -143,9 +26,16 @@ class Tree(object):
         return self.current
 
     def done(self):
+        """
+        self.queue is popped empty and the last element is not None
+        """
         return self.current.value is not None and len(self.queue) == 0
 
     def generate(self, action):
+        """
+        generate left subtree and right subtree\\
+        use when generating sentence
+        """
         self.current.generate(action)
         if self.current.left is not None:
             self.queue.append(self.current.left)
@@ -153,6 +43,9 @@ class Tree(object):
             self.queue.append(self.current.right)
 
     def print_dfs(self):
+        """
+        print the tree
+        """
         stack = [(self.root, 0)]
         while len(stack) > 0:
             curr, level = stack[-1]
@@ -165,6 +58,9 @@ class Tree(object):
                 stack.append((curr.left, level+1))
 
     def to_text(self, exclude_end=True):
+        """
+        transform the tree to sentence
+        """
         tokens = []
         def _inorder(node):
             if node is not None:
@@ -174,19 +70,26 @@ class Tree(object):
                 _inorder(node.right)
         _inorder(self.root)
         return tokens
-"""
 
 class Node(object):
+    """
+    node object of the tree
+    """
     def __init__(self, valid_actions, parent, end_idx, invalid_behavior='split'):
-        self.valid_actions = valid_actions
+        self.valid_actions = valid_actions      # TODO: What's its action?
         self.left = None
         self.right = None
         self.value = None
         self.parent = parent
-        self.END = end_idx
-        self.invalid_behavior = invalid_behavior
+        self.END = end_idx                      # TODO: What's the END for?
+        self.invalid_behavior = invalid_behavior# TODO: What does invalid_behavior represent?
 
     def generate(self, action):
+        """
+        generate action on this node\\
+            - assign a value to this node\\
+            - if value is not END, then assign a left child and a right child
+        """
         if self.value is not None:
             raise ValueError('`generate` has already been called at this Node')
 
@@ -244,6 +147,9 @@ class Node(object):
 
 # --- Data Structures & functions for model samples
 class BinaryNode(object):
+    """
+    no self.END and no self.generate() method.
+    """
     def __init__(self, value, level, index, parent, left, right):
         self.value = value
         self.level = level
@@ -256,6 +162,9 @@ class BinaryNode(object):
 def build_tree(level_order_tokens):
     """Build a binary tree represented as BinaryNode's from the level-order `level_order_tokens`.
     The returned root can be passed to functions such as `tree_to_text` or `print_tree`.
+
+    Use BFS-order to build a binary tree.
+    TODO: what is level_order_tokens? --
     """
     root = BinaryNode(level_order_tokens[0], 0, 0, None, None, None)
     i = 1
@@ -302,69 +211,11 @@ def print_tree(root, show_index=False):
     lines = _build_tree_string(root, show_index)[0]
     return '\n' + '\n'.join((line.rstrip() for line in lines))
 
-
-def _build_tree_string(root, show_index=False):
-    # SOURCE: https://github.com/joowani/binarytree
-    if root is None:
-        return [], 0, 0, 0
-
-    line1 = []
-    line2 = []
-    if show_index:
-        node_repr = '{}-{}'.format(root.index, root.value)
-    else:
-        node_repr = str(root.value)
-
-    new_root_width = gap_size = len(node_repr)
-
-    # Get the left and right sub-boxes, their widths, and root repr positions
-    l_box, l_box_width, l_root_start, l_root_end = \
-        _build_tree_string(root.left, show_index)
-    r_box, r_box_width, r_root_start, r_root_end = \
-        _build_tree_string(root.right, show_index)
-
-    # Draw the branch connecting the current root node to the left sub-box
-    # Pad the line with whitespaces where necessary
-    if l_box_width > 0:
-        l_root = (l_root_start + l_root_end) // 2 + 1
-        line1.append(' ' * (l_root + 1))
-        line1.append('_' * (l_box_width - l_root))
-        line2.append(' ' * l_root + '/')
-        line2.append(' ' * (l_box_width - l_root))
-        new_root_start = l_box_width + 1
-        gap_size += 1
-    else:
-        new_root_start = 0
-
-    # Draw the representation of the current root node
-    line1.append(node_repr)
-    line2.append(' ' * new_root_width)
-
-    # Draw the branch connecting the current root node to the right sub-box
-    # Pad the line with whitespaces where necessary
-    if r_box_width > 0:
-        r_root = (r_root_start + r_root_end) // 2
-        line1.append('_' * r_root)
-        line1.append(' ' * (r_box_width - r_root + 1))
-        line2.append(' ' * r_root + '\\')
-        line2.append(' ' * (r_box_width - r_root))
-        gap_size += 1
-    new_root_end = new_root_start + new_root_width - 1
-
-    # Combine the left and right sub-boxes with the branches drawn above
-    gap = ' ' * gap_size
-    new_box = [''.join(line1), ''.join(line2)]
-    for i in range(max(len(l_box), len(r_box))):
-        l_line = l_box[i] if i < len(l_box) else ' ' * l_box_width
-        r_line = r_box[i] if i < len(r_box) else ' ' * r_box_width
-        new_box.append(l_line + gap + r_line)
-
-    # Return the new box, its width and its root repr positions
-    return new_box, len(new_box[0]), new_root_start, new_root_end
-
-
 # --- testing / demo
 def generate_random_valid(tokens):
+    """
+    TODO: what is this function for? --generate valid data to help training
+    """
     print("Random Valid Generation:")
     import random
     root = Node(tokens, None, 'ø')
@@ -378,13 +229,15 @@ def generate_random_valid(tokens):
     tree.print_dfs()
     return tree
 
-
 def generate_random_invalid(tokens):
+    """
+    generate invalid data to help training
+    """
     print("Random Generation with 20% Invalid Actions:")
     import random
     import string
     import numpy as np
-    root = Node(tokens, None, 'ø')
+    root = Node(tokens, None, 'ø')  # Denmark letter 'ogh'
     tree = Tree(root, 'ø')
 
     go = True
@@ -398,7 +251,6 @@ def generate_random_invalid(tokens):
     tree.print_dfs()
     return tree
 
-
 def generate_left_to_right(tokens):
     print("Left-to-Right Generation")
     root = Node(tokens, None, 'ø')
@@ -411,7 +263,6 @@ def generate_left_to_right(tokens):
     tree.print_dfs()
     return tree
 
-
 def test_demo():
     text = ['a', 'b', 'c', 'd', 'e']
     t2 = generate_left_to_right(text)
@@ -422,7 +273,6 @@ def test_demo():
     print()
     t1 = generate_random_invalid(text)
     print(t1.to_text())
-
 
 def test_binarynode():
     level_order_tokens = ['a', 'b', 'c', 'd', '<end>', '<end>', 'e']

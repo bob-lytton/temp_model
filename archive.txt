@@ -1,0 +1,121 @@
+- Archive the temporarily useless code copies.
+
+tree.py
+# class Tree():
+# 	"""
+# 	The MASK is used to copy trees while training the position and word choser\\
+# 	We used the processing tree as the input of training\\
+# 	Its word is contained in ROOT
+# 	"""
+# 	def __init__(self, root):
+# 		self.root = root
+# 		self.index = 0
+# 		self.left = False
+# 		self.right = False
+# 		# 0: don't copy its son
+# 		# 1: only copy left son if it have
+# 		# 2: copy both left and right sons
+# 		self.mask = 0
+
+# 	def __deepcopy__(self, memo):
+# 		if memo is None:
+# 			memo = {}
+# 		dup = Tree(self.root)
+# 		dup.index = self.index
+# 		if self.left and self.mask > 0:
+# 			dup.left = copy.deepcopy(self.left)
+# 		if self.right and self.mask > 1:
+# 			dup.right = copy.deepcopy(self.right)
+# 		return dup
+
+# 	def horizontal_scan(self, contain_end = True):
+# 		""" Return the result (sentence?) of horizontal scanning """
+# 		flag = bool(contain_end or (not self.root == '<end>'))
+# 		tmp = [self.root] if flag else []
+# 		if self.left:
+# 			tmp = self.left.horizontal_scan(contain_end)
+# 			if flag:
+# 				tmp.append(self.root)
+# 		if self.right:
+# 			tmp.extend(self.right.horizontal_scan(contain_end))
+# 		return tmp
+
+# 	def leaves(self, contain_single=False):
+# 		"""
+# 		Return its leaves\\
+# 		If contain_single, it will return the single-son node too
+# 		"""
+# 		if (not self.left) and (not self.right) and not(self.root == '<end>'):
+# 			return [self]
+# 		tmp = []
+# 		if contain_single and (self.root != '<end>') and (self.left == False or self.right == False):
+# 			tmp = [self]
+# 		if self.left:
+# 			tmp = self.left.leaves(contain_single) + tmp
+# 		if self.right:
+# 			tmp = tmp + self.right.leaves(contain_single)
+# 		return tmp
+
+# 	def nodenum(self):
+# 		tmp = 1
+# 		if self.left:
+# 			tmp = tmp + self.left.nodenum()
+# 		if self.right:
+# 			tmp = tmp + self.right.nodenum()
+# 		return tmp
+
+# 	def tree2graph(self, sen_encoder, dictionary, nodedim):
+# 		"""
+# 		just act like its name, waiting to finish
+# 		"""
+# 		nodenum = self.make_index() + 1
+# 		the_graph = Graph(nodenum, nodedim, nodedim)
+# 		the_graph.match_tree(self, sen_encoder, dictionary)
+# 		return the_graph
+
+# 	def make_index(self, start_i = 0):
+# 		"""
+# 		Attach horizontial index to the root node of its subtree.\\
+# 		Return the max index in the subtree
+# 		"""
+# 		if self.left == False and self.right == False:
+# 			self.index = start_i
+# 			return start_i
+# 		nodes = start_i
+# 		if self.left:
+# 			nodes = self.left.make_index(start_i) + 1
+# 		self.index = nodes
+# 		if self.right:
+# 			return self.right.make_index(nodes + 1)
+# 		return nodes
+
+# 	def find_index(self, theroot):
+# 		"""
+# 		Find the index of specific node with given word (theroot)
+# 		"""
+# 		a = self.left.find_index(theroot) if self.left else False
+# 		if a is not False:
+# 			return a
+# 		if self.root == theroot:
+# 			return self.index
+# 		a = self.right.find_index(theroot) if self.right else False
+# 		if a is not False:
+# 			return a
+# 		return False
+
+# 	def insert_son(self, father_index, son_root):
+# 		"""
+# 		Insert a node with given word
+# 		"""
+# 		if self.index == father_index:
+# 			if not self.left:
+# 				self.left = Tree(son_root)
+# 			elif not self.right: 
+# 				self.right = Tree(son_root)
+# 			else:
+# 				return False
+# 			return True
+# 		else:
+# 			if self.left == False or self.left.insert_son(father_index, son_root) == False:
+# 				return self.right and self.right.insert_son(father_index, son_root)
+# 			return True
