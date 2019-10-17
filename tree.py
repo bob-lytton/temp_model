@@ -147,9 +147,6 @@ class Node(object):
 
 # --- Data Structures & functions for model samples
 class BinaryNode(object):
-    """
-    no self.END and no self.generate() method.
-    """
     def __init__(self, value, level, index, parent, left, right):
         self.value = value
         self.level = level
@@ -162,9 +159,6 @@ class BinaryNode(object):
 def build_tree(level_order_tokens):
     """Build a binary tree represented as BinaryNode's from the level-order `level_order_tokens`.
     The returned root can be passed to functions such as `tree_to_text` or `print_tree`.
-
-    Use BFS-order to build a binary tree.
-    TODO: what is level_order_tokens? --
     """
     root = BinaryNode(level_order_tokens[0], 0, 0, None, None, None)
     i = 1
@@ -211,11 +205,69 @@ def print_tree(root, show_index=False):
     lines = _build_tree_string(root, show_index)[0]
     return '\n' + '\n'.join((line.rstrip() for line in lines))
 
+
+def _build_tree_string(root, show_index=False):
+    # SOURCE: https://github.com/joowani/binarytree
+    if root is None:
+        return [], 0, 0, 0
+
+    line1 = []
+    line2 = []
+    if show_index:
+        node_repr = '{}-{}'.format(root.index, root.value)
+    else:
+        node_repr = str(root.value)
+
+    new_root_width = gap_size = len(node_repr)
+
+    # Get the left and right sub-boxes, their widths, and root repr positions
+    l_box, l_box_width, l_root_start, l_root_end = \
+        _build_tree_string(root.left, show_index)
+    r_box, r_box_width, r_root_start, r_root_end = \
+        _build_tree_string(root.right, show_index)
+
+    # Draw the branch connecting the current root node to the left sub-box
+    # Pad the line with whitespaces where necessary
+    if l_box_width > 0:
+        l_root = (l_root_start + l_root_end) // 2 + 1
+        line1.append(' ' * (l_root + 1))
+        line1.append('_' * (l_box_width - l_root))
+        line2.append(' ' * l_root + '/')
+        line2.append(' ' * (l_box_width - l_root))
+        new_root_start = l_box_width + 1
+        gap_size += 1
+    else:
+        new_root_start = 0
+
+    # Draw the representation of the current root node
+    line1.append(node_repr)
+    line2.append(' ' * new_root_width)
+
+    # Draw the branch connecting the current root node to the right sub-box
+    # Pad the line with whitespaces where necessary
+    if r_box_width > 0:
+        r_root = (r_root_start + r_root_end) // 2
+        line1.append('_' * r_root)
+        line1.append(' ' * (r_box_width - r_root + 1))
+        line2.append(' ' * r_root + '\\')
+        line2.append(' ' * (r_box_width - r_root))
+        gap_size += 1
+    new_root_end = new_root_start + new_root_width - 1
+
+    # Combine the left and right sub-boxes with the branches drawn above
+    gap = ' ' * gap_size
+    new_box = [''.join(line1), ''.join(line2)]
+    for i in range(max(len(l_box), len(r_box))):
+        l_line = l_box[i] if i < len(l_box) else ' ' * l_box_width
+        r_line = r_box[i] if i < len(r_box) else ' ' * r_box_width
+        new_box.append(l_line + gap + r_line)
+
+    # Return the new box, its width and its root repr positions
+    return new_box, len(new_box[0]), new_root_start, new_root_end
+
+
 # --- testing / demo
 def generate_random_valid(tokens):
-    """
-    TODO: what is this function for? --generate valid data to help training
-    """
     print("Random Valid Generation:")
     import random
     root = Node(tokens, None, 'ø')
@@ -229,15 +281,13 @@ def generate_random_valid(tokens):
     tree.print_dfs()
     return tree
 
+
 def generate_random_invalid(tokens):
-    """
-    generate invalid data to help training
-    """
     print("Random Generation with 20% Invalid Actions:")
     import random
     import string
     import numpy as np
-    root = Node(tokens, None, 'ø')  # Denmark letter 'ogh'
+    root = Node(tokens, None, 'ø')
     tree = Tree(root, 'ø')
 
     go = True
@@ -245,11 +295,15 @@ def generate_random_invalid(tokens):
         action = random.sample(tree.current.valid_actions, 1)[0]
         # generate an invalid action w.p. beta
         if np.random.binomial(1, p=0.2):
-            action = ''.join(random.choices(string.ascii_uppercase, k=5))
+            # action = ''.join(random.choices(string.ascii_uppercase, k=5))
+            action = []
+            for i in range(5):
+                action.append(''.join(random.choice(string.ascii_uppercase)))
         tree.generate(action)
         go = tree.next()
     tree.print_dfs()
     return tree
+
 
 def generate_left_to_right(tokens):
     print("Left-to-Right Generation")
@@ -263,149 +317,37 @@ def generate_left_to_right(tokens):
     tree.print_dfs()
     return tree
 
-def test_demo():
-    text = ['a', 'b', 'c', 'd', 'e']
-    t2 = generate_left_to_right(text)
-    print(t2.to_text())
-    print()
-    t1 = generate_random_valid(text)
-    print(t1.to_text())
-    print()
-    t1 = generate_random_invalid(text)
-    print(t1.to_text())
-
-def test_binarynode():
-    level_order_tokens = ['a', 'b', 'c', 'd', '<end>', '<end>', 'e']
-    root = build_tree(level_order_tokens)
-    print(print_tree(root))
-
-    level_order_tokens = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
-    root = build_tree(level_order_tokens)
-    print(print_tree(root))
-
-    level_order_tokens = ['a', '<end>', 'b', '<end>', 'c', '<end>', 'd', '<end>', '<end>', '<p>', '<p>']
-    root = build_tree(level_order_tokens)
-    print(print_tree(root))
-
-    import string
-    letters = string.ascii_lowercase
-    root = build_tree(letters)
-    print(print_tree(root))
-
-def refresh_mask(tree):
-	tree.mask = 0
-	if tree.left:
-		refresh_mask(tree.left)
-	if tree.right:
-		refresh_mask(tree.right)
-
-def random_seq(tree):
-	dest = tree.nodenum()
-	candidate = [tree]
-	seq = []
-	indseq = []
-	wordseq = []
-	ansseq = []
-	treeseq = [copy.deepcopy(tree)]
-	tmp = copy.deepcopy(tree)
-	tmp.make_index()
-	while len(candidate) > 0:
-		flag = False
-		a = random.choice(candidate)
-		seq.append(a)
-		wordseq.append(a.root)
-		indseq.append(tmp.find_index(a.root))
-		if a.mask == 1 and a.right:
-			ansseq.append(a.right.root)
-		elif a.left:
-			ansseq.append(a.left.root)
-		if (a.left is not False) and not ((a.left in seq) or (a.left in candidate) or a.mask == 1):
-			if a.left.root != '<end>':
-				candidate.append(a.left)
-			a.mask = 1
-			if a.right is not False:
-				flag = True
-		elif (a.right is not False):
-			if a.right.root != '<end>':
-				candidate.append(a.right)
-			a.mask = 2
-		if flag == False:
-			candidate.remove(a)
-		tmp = copy.deepcopy(tree)
-		tmp.make_index()
-		treeseq.append(tmp)
-		#print_tree(tmp, True)
-		
-	return seq, indseq, wordseq, treeseq[:-1], ansseq
-
-def _build_tree_string(root, show_index=False):
-	# SOURCE: https://github.com/joowani/binarytree
-	if root is None:
-		return [], 0, 0, 0
-	if root is False:
-		return [], 0, 0, 0
-
-	line1 = []
-	line2 = []
-	if show_index:
-		node_repr = '{}-{}'.format(root.index, root.root)
-	else:
-		node_repr = str(root.root)
-
-	new_root_width = gap_size = len(node_repr)
-
-	# Get the left and right sub-boxes, their widths, and root repr positions
-	l_box, l_box_width, l_root_start, l_root_end = \
-		_build_tree_string(root.left, show_index)
-	r_box, r_box_width, r_root_start, r_root_end = \
-		_build_tree_string(root.right, show_index)
-
-	# Draw the branch connecting the current root node to the left sub-box
-	# Pad the line with whitespaces where necessary
-	if l_box_width > 0:
-		l_root = (l_root_start + l_root_end) // 2 + 1
-		line1.append(' ' * (l_root + 1))
-		line1.append('_' * (l_box_width - l_root))
-		line2.append(' ' * l_root + '/')
-		line2.append(' ' * (l_box_width - l_root))
-		new_root_start = l_box_width + 1
-		gap_size += 1
-	else:
-		new_root_start = 0
-
-	# Draw the representation of the current root node
-	line1.append(node_repr)
-	line2.append(' ' * new_root_width)
-
-	# Draw the branch connecting the current root node to the right sub-box
-	# Pad the line with whitespaces where necessary
-	if r_box_width > 0:
-		r_root = (r_root_start + r_root_end) // 2
-		line1.append('_' * r_root)
-		line1.append(' ' * (r_box_width - r_root + 1))
-		line2.append(' ' * r_root + '\\')
-		line2.append(' ' * (r_box_width - r_root))
-		gap_size += 1
-	new_root_end = new_root_start + new_root_width - 1
-
-	# Combine the left and right sub-boxes with the branches drawn above
-	gap = ' ' * gap_size
-	new_box = [''.join(line1), ''.join(line2)]
-	for i in range(max(len(l_box), len(r_box))):
-		l_line = l_box[i] if i < len(l_box) else ' ' * l_box_width
-		r_line = r_box[i] if i < len(r_box) else ' ' * r_box_width
-		new_box.append(l_line + gap + r_line)
-
-	# Return the new box, its width and its root repr positions
-	return new_box, len(new_box[0]), new_root_start, new_root_end
-
-def print_tree(tree, show_index=False):
-	lines = _build_tree_string(tree, show_index)[0]
-	print('tree word sequence:')
-	for i in tree.leaves(contain_single=False):
-		print(i.root, end=' ')
-	print('\n' + '\n'.join((line.rstrip() for line in lines)))
-
 if __name__ == '__main__':
+
+    def test_demo():
+        text = ['a', 'b', 'c', 'd', 'e']
+        t2 = generate_left_to_right(text)
+        print(t2.to_text())
+        print()
+        t1 = generate_random_valid(text)
+        print(t1.to_text())
+        print()
+        t1 = generate_random_invalid(text)
+        print(t1.to_text())
+
+
+    def test_binarynode():
+        level_order_tokens = ['a', 'b', 'c', 'd', '<end>', '<end>', 'e']
+        root = build_tree(level_order_tokens)
+        print(print_tree(root))
+
+        level_order_tokens = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
+        root = build_tree(level_order_tokens)
+        print(print_tree(root))
+
+        level_order_tokens = ['a', '<end>', 'b', '<end>', 'c', '<end>', 'd', '<end>', '<end>', '<p>', '<p>']
+        root = build_tree(level_order_tokens)
+        print(print_tree(root))
+
+        import string
+        letters = string.ascii_lowercase
+        root = build_tree(letters)
+        print(print_tree(root))
+
     test_demo()
     test_binarynode()
